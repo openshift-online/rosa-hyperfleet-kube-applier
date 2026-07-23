@@ -231,7 +231,22 @@ func (c *ReadDesireInformerManagingController) processNext(ctx context.Context) 
 		return true
 	}
 	c.queue.Forget(key)
+	// Safety-net: re-enqueue after 5 minutes so that any spec change missed
+	// during downtime is eventually reconciled.
+	c.queue.AddAfter(key, 5*time.Minute)
 	return true
+}
+
+// EnqueueByDocumentID enqueues a ReadDesire for reconciliation by its raw
+// document ID. It is called by the SQS poller when a spec change notification
+// arrives for the read-desires table.
+func (c *ReadDesireInformerManagingController) EnqueueByDocumentID(documentID string) {
+	key, err := keys.ReadDesireKeyFromDocumentID(documentID)
+	if err != nil {
+		utilruntime.HandleError(err)
+		return
+	}
+	c.queue.Add(key)
 }
 
 // SyncOnce reconciles one ReadDesire by ensuring its per-instance controller

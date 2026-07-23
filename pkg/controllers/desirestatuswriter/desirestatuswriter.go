@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/equality"
+	"k8s.io/klog/v2"
 
 	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/internal/database"
 )
@@ -95,6 +96,9 @@ func (w *writer[T, K, PT]) UpdateStatus(ctx context.Context, key K, mutate Mutat
 	mutate(desired)
 
 	if equality.Semantic.DeepEqual(existing, desired) {
+		klog.FromContext(ctx).V(4).Info("Status unchanged; skipping write and SNS publish",
+			"key", key,
+		)
 		return nil
 	}
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# start-localstack.sh — starts a LocalStack container with DynamoDB and
-# DynamoDB Streams enabled in detached mode, then waits for it to be healthy.
+# start-localstack.sh — starts a LocalStack container with DynamoDB,
+# DynamoDB Streams, SQS, and SNS enabled in detached mode, then waits for it
+# to be healthy.
 #
 # Idempotent: if the container is already running it is reused.
 # A stopped/dead container is replaced.
@@ -54,7 +55,7 @@ echo "Starting ${IMAGE} on 127.0.0.1:${PORT} ..."
 "${CONTAINER_ENGINE}" run -d \
   --name "${CONTAINER_NAME}" \
   -p "127.0.0.1:${PORT}:4566" \
-  -e "SERVICES=dynamodb,dynamodbstreams" \
+  -e "SERVICES=dynamodb,dynamodbstreams,sqs,sns" \
   -e "DEBUG=0" \
   "${AUTH_ARGS[@]}" \
   "${IMAGE}"

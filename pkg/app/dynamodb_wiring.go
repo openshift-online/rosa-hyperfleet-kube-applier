@@ -7,7 +7,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
-	"github.com/aws/aws-sdk-go-v2/service/dynamodbstreams"
 )
 
 // NewDynamoDBConfig loads the default AWS SDK configuration. region is
@@ -30,10 +29,4 @@ func NewDynamoDBConfig(ctx context.Context, region, endpointURL string) (aws.Con
 // NewDynamoDBClient creates a DynamoDB client from the provided AWS config.
 func NewDynamoDBClient(cfg aws.Config) *dynamodb.Client {
 	return dynamodb.NewFromConfig(cfg)
-}
-
-// NewDynamoDBStreamsClient creates a DynamoDB Streams client from the provided
-// AWS config.
-func NewDynamoDBStreamsClient(cfg aws.Config) *dynamodbstreams.Client {
-	return dynamodbstreams.NewFromConfig(cfg)
 }

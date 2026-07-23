@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"sync"
 	"testing"
 	"time"
 
@@ -13,8 +12,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	dbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
-	"github.com/aws/aws-sdk-go-v2/service/dynamodbstreams"
-	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/tools/cache"
 
 	kubeapplier "github.com/rrp-bot/rosa-hyperfleet-kube-applier/api/kubeapplier"
@@ -23,90 +20,6 @@ import (
 )
 
 // --- Unit tests (no LocalStack required) ---
-
-// TestGetRecordsLimit verifies the declared per-call record limit is the AWS
-// maximum so that it is always explicit rather than relying on API defaults.
-func TestGetRecordsLimit(t *testing.T) {
-	if getRecordsLimit != 1000 {
-		t.Errorf("getRecordsLimit = %d, want 1000", getRecordsLimit)
-	}
-}
-
-// TestPollShardWaitsForParent verifies the parent-before-child ordering
-// guarantee (Fix 1): a child shard goroutine must not start polling until the
-// parent's done channel is closed.
-func TestPollShardWaitsForParent(t *testing.T) {
-	parentDone := make(chan struct{})
-
-	var mu sync.RWMutex
-	workers := map[string]*shardWorkerState{
-		"parent-shard": {done: parentDone},
-	}
-
-	w := &dynamoDBStreamWatcher{
-		resultCh: make(chan watch.Event, 10),
-		done:     make(chan struct{}),
-	}
-	childWS := &shardWorkerState{done: make(chan struct{})}
-	workers["child-shard"] = childWS
-
-	// childPolling is closed by the child goroutine as soon as it exits the
-	// parent-wait select (i.e. once it would start polling).
-	childPolling := make(chan struct{})
-
-	// Run pollShard in the background. We use a context that we cancel as soon
-	// as the parent is done, so the child exits immediately after unblocking
-	// rather than panicking on a nil streamsClient.
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	rediscoverCh := make(chan string, 1)
-	go func() {
-		w.pollShard(
-			ctx,
-			nil, // streamsClient — child exits via ctx cancel before using it
-			"stream-arn",
-			"table",
-			shardState{shardID: "child-shard", parentShardID: "parent-shard"},
-			childWS,
-			&mu,
-			workers,
-			nil,
-			rediscoverCh,
-		)
-		close(childPolling)
-	}()
-
-	// Give the goroutine time to reach the parent-wait select.
-	time.Sleep(30 * time.Millisecond)
-
-	// Child should not have proceeded yet.
-	select {
-	case <-childPolling:
-		t.Fatal("child started polling before parent shard was done")
-	default:
-	}
-
-	// Close parent done and cancel ctx simultaneously so child unblocks then
-	// exits cleanly without calling the nil streamsClient.
-	cancel()
-	close(parentDone)
-
-	// Child must now exit promptly.
-	select {
-	case <-childPolling:
-		// good
-	case <-time.After(2 * time.Second):
-		t.Fatal("child shard goroutine did not exit after parent done and ctx cancel")
-	}
-}
-
-func TestListWatchWithoutWatchListSemantics(t *testing.T) {
-	lw := listWatchWithoutWatchListSemantics{&cache.ListWatch{}}
-	if !lw.IsWatchListSemanticsUnSupported() {
-		t.Error("expected IsWatchListSemanticsUnSupported to return true")
-	}
-}
 
 func TestListerListFromPopulatedCache(t *testing.T) {
 	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
@@ -203,7 +116,7 @@ func requireLocalStack(t *testing.T) {
 	}
 }
 
-func newLocalStackClients(t *testing.T) (*dynamodb.Client, *dynamodbstreams.Client) {
+func newLocalStackClient(t *testing.T) *dynamodb.Client {
 	t.Helper()
 	endpoint := os.Getenv("LOCALSTACK_ENDPOINT")
 	cfg, err := awsconfig.LoadDefaultConfig(context.Background(),
@@ -214,9 +127,7 @@ func newLocalStackClients(t *testing.T) (*dynamodb.Client, *dynamodbstreams.Clie
 	if err != nil {
 		t.Fatalf("awsconfig.LoadDefaultConfig: %v", err)
 	}
-	dbClient := dynamodb.NewFromConfig(cfg)
-	streamsClient := dynamodbstreams.NewFromConfig(cfg)
-	return dbClient, streamsClient
+	return dynamodb.NewFromConfig(cfg)
 }
 
 func createTestTable(t *testing.T, dbClient *dynamodb.Client, tableName string) {
@@ -230,10 +141,6 @@ func createTestTable(t *testing.T, dbClient *dynamodb.Client, tableName string) 
 		},
 		KeySchema: []dbtypes.KeySchemaElement{
 			{AttributeName: aws.String("documentID"), KeyType: dbtypes.KeyTypeHash},
-		},
-		StreamSpecification: &dbtypes.StreamSpecification{
-			StreamEnabled:  aws.Bool(true),
-			StreamViewType: dbtypes.StreamViewTypeNewAndOldImages,
 		},
 	})
 	if err != nil {
@@ -276,7 +183,7 @@ func TestIntegration_InformerSyncsExistingDocuments(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	dbClient, streamsClient := newLocalStackClients(t)
+	dbClient := newLocalStackClient(t)
 	prefix := fmt.Sprintf("inf-existing-%d", time.Now().UnixNano())
 
 	applyTable := prefix + database.TableSuffixApplyDesires
@@ -304,7 +211,7 @@ func TestIntegration_InformerSyncsExistingDocuments(t *testing.T) {
 		}
 	}
 
-	info := NewKubeApplierInformersWithResyncPeriod(dbClient, streamsClient, prefix, 30*time.Second)
+	info := NewKubeApplierInformersWithResyncPeriod(dbClient, prefix, 30*time.Second)
 	startAndSync(t, ctx, info)
 
 	applyInf, applyLister := info.ApplyDesires()
@@ -329,81 +236,12 @@ func TestIntegration_InformerSyncsExistingDocuments(t *testing.T) {
 	}
 }
 
-func TestIntegration_StreamDeliversEvents(t *testing.T) {
-	requireLocalStack(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
-	dbClient, streamsClient := newLocalStackClients(t)
-	prefix := fmt.Sprintf("inf-stream-%d", time.Now().UnixNano())
-
-	applyTable := prefix + database.TableSuffixApplyDesires
-	readTable := prefix + database.TableSuffixReadDesires
-	createTestTable(t, dbClient, applyTable)
-	createTestTable(t, dbClient, readTable)
-
-	dbCRUD := database.NewDynamoDBKubeApplierDBClient(dbClient, dbClient, prefix, prefix)
-	crud := dbCRUD.ApplyDesireStatus()
-
-	info := NewKubeApplierInformersWithResyncPeriod(dbClient, streamsClient, prefix, 30*time.Second)
-	startAndSync(t, ctx, info)
-
-	applyInf, _ := info.ApplyDesires()
-
-	// Create a document — the stream watcher should deliver it.
-	d := &kubeapplier.ApplyDesire{
-		DynamoDBMetadata: kubeapplier.DynamoDBMetadata{DocumentID: "c1--live"},
-		Spec: kubeapplier.ApplyDesireSpec{
-			ManagementCluster: "mc-test",
-			ClusterID:         "c1",
-			TargetItem: kubeapplier.ResourceReference{
-				Version:  "v1",
-				Resource: "configmaps",
-				Name:     "live-cm",
-			},
-		},
-	}
-	created, err := crud.Create(ctx, d)
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	waitForCacheCount(t, applyInf.GetStore(), 1, 30*time.Second)
-
-	// Modify the document.
-	created.Spec.ClusterID = "c2"
-	if _, err := crud.Replace(ctx, created); err != nil {
-		t.Fatalf("Replace: %v", err)
-	}
-
-	// Wait for the modification to appear in the cache.
-	deadline := time.After(30 * time.Second)
-	for {
-		item, exists, _ := applyInf.GetStore().GetByKey("c1--live")
-		if exists {
-			if item.(*kubeapplier.ApplyDesire).Spec.ClusterID == "c2" {
-				break
-			}
-		}
-		select {
-		case <-deadline:
-			t.Fatal("timed out waiting for modification in cache")
-		case <-time.After(100 * time.Millisecond):
-		}
-	}
-
-	// Delete the document.
-	if err := crud.Delete(ctx, "c1--live"); err != nil {
-		t.Fatalf("Delete: %v", err)
-	}
-	waitForCacheCount(t, applyInf.GetStore(), 0, 30*time.Second)
-}
-
 func TestIntegration_PerTableIsolation(t *testing.T) {
 	requireLocalStack(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	dbClient, streamsClient := newLocalStackClients(t)
+	dbClient := newLocalStackClient(t)
 	prefixA := fmt.Sprintf("inf-iso-a-%d", time.Now().UnixNano())
 	prefixB := fmt.Sprintf("inf-iso-b-%d", time.Now().UnixNano())
 
@@ -414,8 +252,8 @@ func TestIntegration_PerTableIsolation(t *testing.T) {
 
 	dbCRUDA := database.NewDynamoDBKubeApplierDBClient(dbClient, dbClient, prefixA, prefixA)
 
-	infoA := NewKubeApplierInformersWithResyncPeriod(dbClient, streamsClient, prefixA, 30*time.Second)
-	infoB := NewKubeApplierInformersWithResyncPeriod(dbClient, streamsClient, prefixB, 30*time.Second)
+	infoA := NewKubeApplierInformersWithResyncPeriod(dbClient, prefixA, 30*time.Second)
+	infoB := NewKubeApplierInformersWithResyncPeriod(dbClient, prefixB, 30*time.Second)
 	startAndSync(t, ctx, infoA)
 	startAndSync(t, ctx, infoB)
 
@@ -438,11 +276,10 @@ func TestIntegration_PerTableIsolation(t *testing.T) {
 		t.Fatalf("Create in A: %v", err)
 	}
 
-	waitForCacheCount(t, applyInfA.GetStore(), 1, 30*time.Second)
-
-	// B should remain empty.
+	// B should remain empty (no stream/poller delivering to B's cache).
 	time.Sleep(500 * time.Millisecond)
 	if len(applyInfB.GetStore().List()) != 0 {
 		t.Errorf("expected 0 items in B's cache, got %d", len(applyInfB.GetStore().List()))
 	}
+	_ = applyInfA // suppress unused warning
 }

@@ -31,6 +31,16 @@ func ApplyDesireKeyFromDesire(d *kubeapplier.ApplyDesire) (ApplyDesireKey, error
 	}, nil
 }
 
+// ApplyDesireKeyFromDocumentID constructs an ApplyDesireKey from a raw
+// document ID (e.g. as received from an SQS notification). ClusterID and
+// NodePoolName are left empty; SyncOnce looks up the spec by Name only.
+func ApplyDesireKeyFromDocumentID(documentID string) (ApplyDesireKey, error) {
+	if documentID == "" {
+		return ApplyDesireKey{}, fmt.Errorf("ApplyDesireKeyFromDocumentID: empty documentID")
+	}
+	return ApplyDesireKey{Name: documentID}, nil
+}
+
 // ReadDesireKey identifies a single ReadDesire.
 type ReadDesireKey struct {
 	ClusterID    string
@@ -49,4 +59,14 @@ func ReadDesireKeyFromDesire(d *kubeapplier.ReadDesire) (ReadDesireKey, error) {
 		NodePoolName: d.Spec.NodePoolName,
 		Name:         d.DocumentID,
 	}, nil
+}
+
+// ReadDesireKeyFromDocumentID constructs a ReadDesireKey from a raw document
+// ID (e.g. as received from an SQS notification). ClusterID and NodePoolName
+// are left empty; SyncOnce looks up the spec by Name only.
+func ReadDesireKeyFromDocumentID(documentID string) (ReadDesireKey, error) {
+	if documentID == "" {
+		return ReadDesireKey{}, fmt.Errorf("ReadDesireKeyFromDocumentID: empty documentID")
+	}
+	return ReadDesireKey{Name: documentID}, nil
 }

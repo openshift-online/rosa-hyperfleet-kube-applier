@@ -20,6 +20,7 @@ import (
 	"k8s.io/component-base/metrics/legacyregistry"
 	"k8s.io/klog/v2"
 
+	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/internal/database/sqspoller"
 	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/pkg/controllers/apply_desire"
 	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/pkg/controllers/read_desire_manager"
 )
@@ -129,16 +130,19 @@ func (o *Options) runControllersUnderLeaderElection(
 	applyInformer, _ := o.Informers.ApplyDesires()
 	readInformer, _ := o.Informers.ReadDesires()
 
+	applyDesireStatus := o.KubeApplierDBClient.ApplyDesireStatus()
+	readDesireStatus := o.KubeApplierDBClient.ReadDesireStatus()
+
 	applyCtl, err := apply_desire.NewApplyDesireController(
 		applyInformer, o.DynamicClient,
-		o.KubeApplierDBClient.ApplyDesireSpecs(), o.KubeApplierDBClient.ApplyDesireStatus(),
+		o.KubeApplierDBClient.ApplyDesireSpecs(), applyDesireStatus,
 		apply_desire.Config{})
 	if err != nil {
 		return fmt.Errorf("apply controller: %w", err)
 	}
 	readMgr, err := read_desire_manager.NewReadDesireInformerManagingController(
 		readInformer, o.DynamicClient,
-		o.KubeApplierDBClient.ReadDesireSpecs(), o.KubeApplierDBClient.ReadDesireStatus(),
+		o.KubeApplierDBClient.ReadDesireSpecs(), readDesireStatus,
 		read_desire_manager.Config{})
 	if err != nil {
 		return fmt.Errorf("read manager: %w", err)
@@ -162,6 +166,16 @@ func (o *Options) runControllersUnderLeaderElection(
 
 				go applyCtl.Run(ctx, threadsApply)
 				go readMgr.Run(ctx, threadsReadManager)
+
+				if o.SQSClient != nil && o.SQSQueueURL != "" {
+					poller := sqspoller.New(
+						o.SQSClient,
+						o.SQSQueueURL,
+						applyCtl.EnqueueByDocumentID,
+						readMgr.EnqueueByDocumentID,
+					)
+					go poller.Run(ctx)
+				}
 			},
 			OnStoppedLeading: func() {
 				logger.Info("lost leader election lease")
