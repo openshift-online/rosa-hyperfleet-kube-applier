@@ -15,6 +15,7 @@ import (
 
 	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/internal/database"
 	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/internal/database/informers"
+	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/internal/database/statussnspublisher"
 	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/pkg/app"
 )
 
@@ -27,6 +28,8 @@ type KubeApplierRootCmdFlags struct {
 	ManagementCluster          string
 	AWSRegion                  string
 	AWSEndpointURL             string
+	SQSQueueURL                string
+	SNSStatusTopicARN          string
 	SpecsTablePrefix           string
 	StatusTablePrefix          string
 	MetricsServerListenAddress string
@@ -46,9 +49,15 @@ func (f *KubeApplierRootCmdFlags) AddFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&f.ManagementCluster, "management-cluster", f.ManagementCluster,
 		"Name of the management cluster this pod runs in.")
 	cmd.Flags().StringVar(&f.AWSRegion, "aws-region", f.AWSRegion,
-		"AWS region where DynamoDB tables reside.")
+		"AWS region where DynamoDB tables and SQS queue reside.")
 	cmd.Flags().StringVar(&f.AWSEndpointURL, "aws-endpoint-url", f.AWSEndpointURL,
 		"Optional AWS endpoint URL override (e.g. http://localhost:4566 for LocalStack).")
+	cmd.Flags().StringVar(&f.SQSQueueURL, "sqs-queue-url", f.SQSQueueURL,
+		"SQS queue URL for receiving spec change notifications from the hyperfleet-operator (required).")
+	cmd.Flags().StringVar(&f.SNSStatusTopicARN, "sns-status-topic-arn", f.SNSStatusTopicARN,
+		"SNS topic ARN for publishing status change notifications to the hyperfleet-operator (optional). "+
+			"When set, a notification is published after every successful status write so the operator "+
+			"is woken immediately rather than waiting for its 5-minute safety-net poll.")
 	cmd.Flags().StringVar(&f.SpecsTablePrefix, "specs-table", f.SpecsTablePrefix,
 		"DynamoDB table name prefix for spec tables (e.g. 'mc-dev-specs'; full table names are prefix+'-applydesires' etc.).")
 	cmd.Flags().StringVar(&f.StatusTablePrefix, "status-table", f.StatusTablePrefix,
@@ -68,7 +77,7 @@ func (f *KubeApplierRootCmdFlags) AddFlags(cmd *cobra.Command) {
 	cmd.Flags().IntVar(&f.KubeBurst, "kube-burst", f.KubeBurst,
 		"Maximum burst for throttle on requests to the kube-apiserver from the dynamic client.")
 
-	for _, name := range []string{"namespace", "management-cluster", "aws-region"} {
+	for _, name := range []string{"namespace", "management-cluster", "aws-region", "sqs-queue-url"} {
 		if err := cmd.MarkFlagRequired(name); err != nil {
 			panic(fmt.Errorf("MarkFlagRequired(%q): %w", name, err))
 		}
@@ -84,6 +93,9 @@ func (f *KubeApplierRootCmdFlags) validate() error {
 	}
 	if len(f.KubeNamespace) == 0 {
 		return fmt.Errorf("--namespace must not be empty")
+	}
+	if len(f.SQSQueueURL) == 0 {
+		return fmt.Errorf("--sqs-queue-url must not be empty")
 	}
 	if len(f.LeaderElectionID) == 0 {
 		return fmt.Errorf("--leader-election-id must not be empty")
@@ -127,14 +139,23 @@ func (f *KubeApplierRootCmdFlags) ToKubeApplierOptions(ctx context.Context) (*ap
 
 	specsClient := app.NewDynamoDBClient(awsCfg)
 	statusClient := app.NewDynamoDBClient(awsCfg)
-	streamsClient := app.NewDynamoDBStreamsClient(awsCfg)
+	sqsClient := app.NewSQSClient(awsCfg)
 
 	dbClient := database.NewDynamoDBKubeApplierDBClient(specsClient, statusClient, specsPrefix, statusPrefix)
-	dynamoDBInformers := informers.NewKubeApplierInformers(specsClient, streamsClient, specsPrefix)
+	dynamoDBInformers := informers.NewKubeApplierInformers(specsClient, specsPrefix)
 
 	dyn, err := app.NewDynamicClient(kubeconfig, f.KubeQPS, f.KubeBurst)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create dynamic client: %w", err)
+	}
+
+	// Build the status SNS publisher if a topic ARN was provided.
+	// It is intentionally optional — omitting the flag disables status
+	// notifications and the operator falls back to 5-minute safety polling.
+	var snsPublisher *statussnspublisher.Publisher
+	if f.SNSStatusTopicARN != "" {
+		snsClient := app.NewSNSClient(awsCfg)
+		snsPublisher = statussnspublisher.New(snsClient, f.SNSStatusTopicARN)
 	}
 
 	return &app.Options{
@@ -143,6 +164,9 @@ func (f *KubeApplierRootCmdFlags) ToKubeApplierOptions(ctx context.Context) (*ap
 		KubeApplierDBClient:        dbClient,
 		Informers:                  dynamoDBInformers,
 		DynamicClient:              dyn,
+		SQSClient:                  sqsClient,
+		SQSQueueURL:                f.SQSQueueURL,
+		StatusSNSPublisher:         snsPublisher,
 		MetricsServerListenAddress: f.MetricsServerListenAddress,
 		HealthzServerListenAddress: f.HealthzServerListenAddress,
 		ExitOnPanic:                f.ExitOnPanic,
@@ -180,7 +204,8 @@ func NewCmdRoot() *cobra.Command {
   # in-cluster kubeconfig.
   %s --management-cluster ${MC_NAME} \
       --aws-region ${AWS_REGION} \
-      --namespace ${NAMESPACE}
+      --namespace ${NAMESPACE} \
+      --sqs-queue-url ${SQS_QUEUE_URL}
 `, app.AppShortDescriptionName, processName),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return RunRootCmd(cmd, flags)

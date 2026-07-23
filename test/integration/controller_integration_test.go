@@ -1,5 +1,5 @@
 // Package integration contains end-to-end tests that wire the full
-// kube-applier-aws stack: LocalStack (DynamoDB + Streams) as the backend store
+// kube-applier-aws stack: LocalStack (DynamoDB + SQS) as the backend store
 // and a Kind cluster (real kube-apiserver) as the reconciliation target.
 //
 // # Prerequisites
@@ -31,7 +31,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	dbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
-	"github.com/aws/aws-sdk-go-v2/service/dynamodbstreams"
+	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/prometheus/client_golang/prometheus"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -78,7 +78,8 @@ func requireIntegration(t *testing.T) (localstackEndpoint, kubeconfigPath string
 // fixture holds all wired dependencies for a single test run.
 type fixture struct {
 	dynDB          *dynamodb.Client
-	streamsDB      *dynamodbstreams.Client
+	sqsClient      *sqs.Client
+	sqsQueueURL    string
 	dbClient       database.KubeApplierDBClient
 	dynKube        dynamic.Interface
 	kubeconfigPath string
@@ -86,8 +87,8 @@ type fixture struct {
 	statusPrefix   string
 }
 
-// newFixture creates unique DynamoDB tables (6 total: 3 specs + 3 status) and
-// registers t.Cleanup to delete them. It also builds the dynamic Kube client.
+// newFixture creates unique DynamoDB tables and an SQS queue, and registers
+// t.Cleanup to delete them. It also builds the dynamic Kube client.
 func newFixture(t *testing.T, localstackEndpoint, kubeconfigPath string) *fixture {
 	t.Helper()
 
@@ -102,7 +103,7 @@ func newFixture(t *testing.T, localstackEndpoint, kubeconfigPath string) *fixtur
 	}
 
 	dynDB := dynamodb.NewFromConfig(cfg)
-	streamsDB := dynamodbstreams.NewFromConfig(cfg)
+	sqsClient := sqs.NewFromConfig(cfg)
 
 	ts := fmt.Sprintf("%d", time.Now().UnixNano())
 	specsPrefix := "inttest-" + ts + "-specs"
@@ -116,6 +117,21 @@ func newFixture(t *testing.T, localstackEndpoint, kubeconfigPath string) *fixtur
 			createTable(t, dynDB, p+suffix)
 		}
 	}
+
+	// Create an SQS queue for this test run.
+	queueName := "inttest-" + ts
+	createOut, err := sqsClient.CreateQueue(context.Background(), &sqs.CreateQueueInput{
+		QueueName: aws.String(queueName),
+	})
+	if err != nil {
+		t.Fatalf("CreateQueue %s: %v", queueName, err)
+	}
+	sqsQueueURL := aws.ToString(createOut.QueueUrl)
+	t.Cleanup(func() {
+		_, _ = sqsClient.DeleteQueue(context.Background(), &sqs.DeleteQueueInput{
+			QueueUrl: aws.String(sqsQueueURL),
+		})
+	})
 
 	dbClient := database.NewDynamoDBKubeApplierDBClient(dynDB, dynDB, specsPrefix, statusPrefix)
 
@@ -131,7 +147,8 @@ func newFixture(t *testing.T, localstackEndpoint, kubeconfigPath string) *fixtur
 
 	return &fixture{
 		dynDB:          dynDB,
-		streamsDB:      streamsDB,
+		sqsClient:      sqsClient,
+		sqsQueueURL:    sqsQueueURL,
 		dbClient:       dbClient,
 		dynKube:        dynKube,
 		kubeconfigPath: kubeconfigPath,
@@ -141,7 +158,7 @@ func newFixture(t *testing.T, localstackEndpoint, kubeconfigPath string) *fixtur
 }
 
 // createTable creates a DynamoDB table with a "documentID" hash key and
-// Streams enabled (NEW_AND_OLD_IMAGES), and registers deletion in t.Cleanup.
+// registers deletion in t.Cleanup.
 func createTable(t *testing.T, dbClient *dynamodb.Client, tableName string) {
 	t.Helper()
 	_, err := dbClient.CreateTable(context.Background(), &dynamodb.CreateTableInput{
@@ -152,10 +169,6 @@ func createTable(t *testing.T, dbClient *dynamodb.Client, tableName string) {
 		},
 		KeySchema: []dbtypes.KeySchemaElement{
 			{AttributeName: aws.String("documentID"), KeyType: dbtypes.KeyTypeHash},
-		},
-		StreamSpecification: &dbtypes.StreamSpecification{
-			StreamEnabled:  aws.Bool(true),
-			StreamViewType: dbtypes.StreamViewTypeNewAndOldImages,
 		},
 	})
 	if err != nil {
@@ -181,7 +194,7 @@ func startApp(t *testing.T, f *fixture) (context.CancelFunc, <-chan error) {
 	reg := prometheus.NewRegistry()
 
 	inf := informers.NewKubeApplierInformersWithResyncPeriod(
-		f.dynDB, f.streamsDB, f.specsPrefix,
+		f.dynDB, f.specsPrefix,
 		5*time.Second,
 	)
 
@@ -209,6 +222,8 @@ func startApp(t *testing.T, f *fixture) (context.CancelFunc, <-chan error) {
 		KubeApplierDBClient:        f.dbClient,
 		Informers:                  inf,
 		DynamicClient:              f.dynKube,
+		SQSClient:                  f.sqsClient,
+		SQSQueueURL:                f.sqsQueueURL,
 		MetricsServerListenAddress: "", // disabled in tests
 		HealthzServerListenAddress: "", // disabled in tests
 		MetricsRegisterer:          reg,
@@ -293,12 +308,8 @@ func createConfigMapDirect(t *testing.T, dynKube dynamic.Interface, namespace, n
 // full access, so we write spec items directly using PutItem.
 // ----------------------------------------------------------------------------
 
-// writeDesireSpec marshals a desire struct into a flat DynamoDB item and
-// writes it to the given table. It follows the same attribute layout as the
-// production attributevalue.MarshalMap path: top-level struct fields become
-// top-level attributes; documentID is written explicitly as a top-level S
-// attribute; kubeContent is stored as the JSON string in spec_kubeContent /
-// status_kubeContent.
+// writeApplyDesireSpec marshals a desire struct into a flat DynamoDB item and
+// writes it to the given table.
 func writeApplyDesireSpec(t *testing.T, dbClient *dynamodb.Client, specsPrefix string, d *kubeapplier.ApplyDesire) {
 	t.Helper()
 	tableName := specsPrefix + database.TableSuffixApplyDesires
@@ -335,6 +346,25 @@ func writeApplyDesireSpec(t *testing.T, dbClient *dynamodb.Client, specsPrefix s
 		Item:      item,
 	}); err != nil {
 		t.Fatalf("writeApplyDesireSpec PutItem %s/%s: %v", tableName, d.DocumentID, err)
+	}
+}
+
+// sendSQSNotification publishes a SpecNotification message directly to the SQS
+// queue so the poller picks it up and enqueues the document ID for reconciliation.
+func sendSQSNotification(t *testing.T, sqsClient *sqs.Client, queueURL, documentID, tableSuffix string) {
+	t.Helper()
+	body, err := json.Marshal(map[string]string{
+		"documentID":  documentID,
+		"tableSuffix": tableSuffix,
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal SQS notification: %v", err)
+	}
+	if _, err := sqsClient.SendMessage(context.Background(), &sqs.SendMessageInput{
+		QueueUrl:    aws.String(queueURL),
+		MessageBody: aws.String(string(body)),
+	}); err != nil {
+		t.Fatalf("SendMessage: %v", err)
 	}
 }
 
@@ -375,6 +405,9 @@ func TestIntegration_DeleteDesire(t *testing.T) {
 		cancel()
 		<-errCh
 	})
+
+	// Send SQS notification so the poller enqueues the document for reconciliation.
+	sendSQSNotification(t, f.sqsClient, f.sqsQueueURL, documentID, database.TableSuffixApplyDesires)
 
 	// 1. ConfigMap must be gone.
 	pollUntil(t, 60*time.Second, func() bool {
@@ -433,7 +466,7 @@ func writeReadDesireSpec(t *testing.T, dbClient *dynamodb.Client, specsPrefix st
 
 // TestIntegration_ApplyDesire writes an ApplyDesire spec to the DynamoDB specs
 // table, starts the full app stack (informers + controllers + leader election),
-// and asserts that:
+// sends an SQS notification, and asserts that:
 //  1. The corresponding ConfigMap appears in the Kind cluster.
 //  2. The status document in DynamoDB records Successful=True.
 func TestIntegration_ApplyDesire(t *testing.T) {
@@ -484,6 +517,9 @@ func TestIntegration_ApplyDesire(t *testing.T) {
 		<-errCh
 	})
 
+	// Send SQS notification so the poller enqueues the document for reconciliation.
+	sendSQSNotification(t, f.sqsClient, f.sqsQueueURL, documentID, database.TableSuffixApplyDesires)
+
 	// 1. ConfigMap must appear in the Kind cluster.
 	pollUntil(t, 60*time.Second, func() bool {
 		obj, _ := getConfigMap(f.dynKube, namespace, cmName)
@@ -512,8 +548,9 @@ func TestIntegration_ApplyDesire(t *testing.T) {
 }
 
 // TestIntegration_ReadDesire pre-creates a ConfigMap on Kind, writes a
-// ReadDesire spec to DynamoDB, starts the app, and asserts that the status
-// document's KubeContent field is populated with the live object JSON.
+// ReadDesire spec to DynamoDB, starts the app, sends an SQS notification, and
+// asserts that the status document's KubeContent field is populated with the
+// live object JSON.
 func TestIntegration_ReadDesire(t *testing.T) {
 	localstackEndpoint, kubeconfigPath := requireIntegration(t)
 	f := newFixture(t, localstackEndpoint, kubeconfigPath)
@@ -546,6 +583,9 @@ func TestIntegration_ReadDesire(t *testing.T) {
 		cancel()
 		<-errCh
 	})
+
+	// Send SQS notification so the poller enqueues the document for reconciliation.
+	sendSQSNotification(t, f.sqsClient, f.sqsQueueURL, documentID, database.TableSuffixReadDesires)
 
 	// Status.KubeContent must be populated.
 	pollUntil(t, 60*time.Second, func() bool {
@@ -603,6 +643,9 @@ func TestIntegration_OptimisticConcurrency(t *testing.T) {
 		_ = f.dynKube.Resource(configMapGVR).Namespace(namespace).Delete(
 			context.Background(), cmName, metav1.DeleteOptions{})
 	})
+
+	// Send SQS notification so the poller triggers initial reconciliation.
+	sendSQSNotification(t, f.sqsClient, f.sqsQueueURL, documentID, database.TableSuffixApplyDesires)
 
 	statusCRUD := f.dbClient.ApplyDesireStatus()
 

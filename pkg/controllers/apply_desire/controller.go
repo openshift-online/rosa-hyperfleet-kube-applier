@@ -191,7 +191,7 @@ func (c *ApplyDesireController) handleDelete(obj any) {
 		}
 	}
 	if err := c.statusCRUD.Delete(context.Background(), d.GetDocumentID()); err != nil && !database.IsNotFoundError(err) {
-		klog.ErrorS(err, "stream watcher failed to delete status record for removed spec", "documentID", d.GetDocumentID())
+		klog.ErrorS(err, "failed to delete status record for removed apply desire spec", "documentID", d.GetDocumentID())
 	}
 }
 
@@ -243,7 +243,23 @@ func (c *ApplyDesireController) processNext(ctx context.Context) bool {
 		return true
 	}
 	c.queue.Forget(key)
+	// Safety-net: re-enqueue after 5 minutes so that any spec change missed
+	// during downtime (e.g. between SNS publish and SQS visibility timeout
+	// expiry) is eventually reconciled without waiting for the full resync.
+	c.queue.AddAfter(key, 5*time.Minute)
 	return true
+}
+
+// EnqueueByDocumentID enqueues an ApplyDesire for reconciliation by its raw
+// document ID. It is called by the SQS poller when a spec change notification
+// arrives for the apply-desires table.
+func (c *ApplyDesireController) EnqueueByDocumentID(documentID string) {
+	key, err := keys.ApplyDesireKeyFromDocumentID(documentID)
+	if err != nil {
+		utilruntime.HandleError(err)
+		return
+	}
+	c.queue.Add(key)
 }
 
 // SyncOnce performs a single reconcile pass for the named ApplyDesire.

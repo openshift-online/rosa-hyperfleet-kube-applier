@@ -9,6 +9,7 @@ import (
 
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clocktesting "k8s.io/utils/clock/testing"
 
 	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/api/kubeapplier"
@@ -481,4 +482,28 @@ func TestHandleDelete_InvalidType_NoOp(t *testing.T) {
 	}
 	// Should not panic.
 	c.handleDelete("not a read desire")
+}
+
+func TestEnqueueByDocumentID_AddsToQueue(t *testing.T) {
+	c := newCadenceController(t, Config{})
+
+	c.EnqueueByDocumentID("cluster1--rd1")
+
+	if c.queue.Len() != 1 {
+		t.Errorf("expected 1 item in queue after EnqueueByDocumentID, got %d", c.queue.Len())
+	}
+}
+
+func TestEnqueueByDocumentID_EmptyID_NoQueue(t *testing.T) {
+	// Suppress utilruntime error logging during test.
+	saved := utilruntime.ErrorHandlers
+	utilruntime.ErrorHandlers = nil
+	defer func() { utilruntime.ErrorHandlers = saved }()
+
+	c := newCadenceController(t, Config{})
+	c.EnqueueByDocumentID("")
+
+	if c.queue.Len() != 0 {
+		t.Errorf("expected 0 items for empty documentID, got %d", c.queue.Len())
+	}
 }

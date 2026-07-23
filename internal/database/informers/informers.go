@@ -6,8 +6,6 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
-	"github.com/aws/aws-sdk-go-v2/service/dynamodbstreams"
-	streamtypes "github.com/aws/aws-sdk-go-v2/service/dynamodbstreams/types"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
@@ -33,22 +31,20 @@ type kubeApplierInformers struct {
 	readDesireLister    listers.ReadDesireLister
 }
 
-// NewKubeApplierInformers creates informers that watch the specs DynamoDB
-// tables for desire document changes. specsClient is the DynamoDB client for
-// the specs tables; streamsClient is the DynamoDB Streams client used for
-// change notification. specsPrefix is the table name prefix (full table names
-// are prefix + "-applydesires" / "-readdesires").
+// NewKubeApplierInformers creates informers that populate their caches from a
+// full DynamoDB Scan on startup. Incremental change notification is handled by
+// the SQS poller (see internal/database/sqspoller), not by DynamoDB Streams.
+// specsClient is the DynamoDB client for the specs tables. specsPrefix is the
+// table name prefix (full table names are prefix + "-applydesires" / "-readdesires").
 func NewKubeApplierInformers(
 	specsClient *dynamodb.Client,
-	streamsClient *dynamodbstreams.Client,
 	specsPrefix string,
 ) KubeApplierInformers {
-	return NewKubeApplierInformersWithResyncPeriod(specsClient, streamsClient, specsPrefix, defaultResyncPeriod)
+	return NewKubeApplierInformersWithResyncPeriod(specsClient, specsPrefix, defaultResyncPeriod)
 }
 
 func NewKubeApplierInformersWithResyncPeriod(
 	specsClient *dynamodb.Client,
-	streamsClient *dynamodbstreams.Client,
 	specsPrefix string,
 	resyncPeriod time.Duration,
 ) KubeApplierInformers {
@@ -57,13 +53,8 @@ func NewKubeApplierInformersWithResyncPeriod(
 
 	applyInf := newDesireInformer(
 		specsClient,
-		streamsClient,
 		applyTable,
 		&kubeapplier.ApplyDesire{},
-		func(item map[string]streamtypes.AttributeValue) (runtime.Object, error) {
-			// Convert stream image attributes to dynamodb/types.AttributeValue.
-			return database.ItemToApplyDesire(streamImageToDynamoDBItem(item))
-		},
 		func(ctx context.Context) (runtime.Object, error) {
 			specReader := database.NewDynamoDBKubeApplierDBClient(specsClient, specsClient, specsPrefix, specsPrefix).ApplyDesireSpecs()
 			items, err := specReader.List(ctx)
@@ -82,12 +73,8 @@ func NewKubeApplierInformersWithResyncPeriod(
 
 	readInf := newDesireInformer(
 		specsClient,
-		streamsClient,
 		readTable,
 		&kubeapplier.ReadDesire{},
-		func(item map[string]streamtypes.AttributeValue) (runtime.Object, error) {
-			return database.ItemToReadDesire(streamImageToDynamoDBItem(item))
-		},
 		func(ctx context.Context) (runtime.Object, error) {
 			specReader := database.NewDynamoDBKubeApplierDBClient(specsClient, specsClient, specsPrefix, specsPrefix).ReadDesireSpecs()
 			items, err := specReader.List(ctx)
@@ -113,11 +100,9 @@ func NewKubeApplierInformersWithResyncPeriod(
 }
 
 func newDesireInformer(
-	dbClient *dynamodb.Client,
-	streamsClient *dynamodbstreams.Client,
-	tableName string,
+	_ *dynamodb.Client,
+	_ string,
 	exampleObj runtime.Object,
-	streamConvertFn func(map[string]streamtypes.AttributeValue) (runtime.Object, error),
 	listFn func(context.Context) (runtime.Object, error),
 	resyncPeriod time.Duration,
 ) cache.SharedIndexInformer {
@@ -125,12 +110,22 @@ func newDesireInformer(
 		ListWithContextFunc: func(ctx context.Context, _ metav1.ListOptions) (runtime.Object, error) {
 			return listFn(ctx)
 		},
+		// WatchFuncWithContext returns a no-op watcher that blocks until ctx is
+		// cancelled. Incremental updates are driven by the SQS poller which
+		// enqueues directly into the controller workqueue — not through the
+		// informer cache. The informer cache is populated once by the List
+		// (full Scan) above and then remains a stable snapshot.
 		WatchFuncWithContext: func(ctx context.Context, _ metav1.ListOptions) (watch.Interface, error) {
-			return newDynamoDBStreamWatcher(ctx, dbClient, streamsClient, tableName, streamConvertFn), nil
+			fw := watch.NewFake()
+			go func() {
+				<-ctx.Done()
+				fw.Stop()
+			}()
+			return fw, nil
 		},
 	}
 	return cache.NewSharedIndexInformerWithOptions(
-		&listWatchWithoutWatchListSemantics{lw},
+		lw,
 		exampleObj,
 		cache.SharedIndexInformerOptions{
 			ResyncPeriod: resyncPeriod,
