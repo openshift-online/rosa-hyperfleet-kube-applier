@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
@@ -100,6 +99,16 @@ func NewKubeApplierInformersWithResyncPeriod(
 	}
 }
 
+// listWatchWithoutWatchListSemantics opts out of the WatchList streaming mode
+// enabled by default in client-go v0.35+. Our fake watcher does not emit the
+// bookmark that WatchList requires, so the reflector would never reach Synced
+// without this wrapper.
+type listWatchWithoutWatchListSemantics struct {
+	*cache.ListWatch
+}
+
+func (listWatchWithoutWatchListSemantics) IsWatchListSemanticsUnSupported() bool { return true }
+
 func newDesireInformer(
 	_ *dynamodb.Client,
 	_ string,
@@ -116,27 +125,9 @@ func newDesireInformer(
 		// enqueues directly into the controller workqueue — not through the
 		// informer cache. The informer cache is populated once by the List
 		// (full Scan) above and then remains a stable snapshot.
-		//
-		// A BOOKMARK event is sent immediately so that client-go >= v0.33
-		// considers the initial watch established and marks the cache as synced.
-		// Without it, WaitForCacheSync blocks indefinitely because the reflector
-		// waits for the bookmark before declaring the initial list complete.
-		WatchFuncWithContext: func(ctx context.Context, opts metav1.ListOptions) (watch.Interface, error) {
+		WatchFuncWithContext: func(ctx context.Context, _ metav1.ListOptions) (watch.Interface, error) {
 			fw := watch.NewFake()
 			go func() {
-				// Send a bookmark with the resource version from the List so
-				// the reflector knows the initial watch is established.
-				// client-go >= v0.33 requires a BOOKMARK event before it
-				// considers WaitForCacheSync satisfied.
-				rv := opts.ResourceVersion
-				if rv == "" {
-					rv = "0"
-				}
-				bookmark := exampleObj.DeepCopyObject()
-				if acc, err := meta.Accessor(bookmark); err == nil {
-					acc.SetResourceVersion(rv)
-				}
-				fw.Action(watch.Bookmark, bookmark)
 				<-ctx.Done()
 				fw.Stop()
 			}()
@@ -144,7 +135,7 @@ func newDesireInformer(
 		},
 	}
 	return cache.NewSharedIndexInformerWithOptions(
-		lw,
+		&listWatchWithoutWatchListSemantics{lw},
 		exampleObj,
 		cache.SharedIndexInformerOptions{
 			ResyncPeriod: resyncPeriod,
