@@ -12,3 +12,4 @@ export GOFLAGS=-mod=mod
 
 make fmt
 make vet
+make lint

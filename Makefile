@@ -1,6 +1,6 @@
 .PHONY: help build desire-tool desirectl \
 	test test-unit test-integration \
-	fmt vet verify \
+	fmt vet lint verify \
 	image image-push \
 	infra-up infra-down localstack kind-setup \
 	run-local clean
@@ -18,6 +18,13 @@ LOCALSTACK_PORT    ?= 4566
 KIND_CLUSTER_NAME  ?= kube-applier-dev
 
 CONTAINER_ENGINE ?= $(shell command -v podman 2>/dev/null || command -v docker 2>/dev/null)
+
+TOOLS_DIR     := ./hack/tools
+TOOLS_BIN_DIR := $(TOOLS_DIR)/bin
+GOLANGCI_LINT := $(abspath $(TOOLS_BIN_DIR)/golangci-lint)
+
+$(GOLANGCI_LINT): $(TOOLS_DIR)/go.mod
+	cd $(TOOLS_DIR); go build -tags=tools -o $(abspath $(TOOLS_BIN_DIR))/golangci-lint github.com/golangci/golangci-lint/v2/cmd/golangci-lint
 
 # ── Help ─────────────────────────────────────────────────────────────────
 
@@ -38,6 +45,7 @@ help:
 	@echo "Code Quality:"
 	@echo "  fmt              go fmt on all packages"
 	@echo "  vet              go vet on all packages"
+	@echo "  lint             golangci-lint on all packages"
 	@echo "  verify           go mod tidy + check for drift"
 	@echo ""
 	@echo "Images:"
@@ -89,6 +97,9 @@ fmt:
 
 vet:
 	go vet ./...
+
+lint: $(GOLANGCI_LINT)
+	$(GOLANGCI_LINT) run --config .golangci.yml --timeout 5m ./...
 
 verify:
 	go mod tidy
