@@ -6,7 +6,7 @@ const (
 )
 
 const (
-	ConditionReasonKubeAPIError = "KubeAPIError"
+	ConditionReasonKubeAPIError   = "KubeAPIError"
 	ConditionReasonPreCheckFailed = "PreCheckFailed"
 
 	// ConditionReasonWaitingForDeletion is set on an ApplyDesire with Type=Delete when the

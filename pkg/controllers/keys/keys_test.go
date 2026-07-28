@@ -32,7 +32,7 @@ func TestApplyDesireKeyFromDesire_NodePoolScoped(t *testing.T) {
 	d := &kubeapplier.ApplyDesire{
 		DynamoDBMetadata: kubeapplier.DynamoDBMetadata{DocumentID: "desire-2"},
 		Spec: kubeapplier.ApplyDesireSpec{
-			ClusterID:  "cluster-a",
+			ClusterID:    "cluster-a",
 			NodePoolName: "np-1",
 		},
 	}
@@ -57,7 +57,6 @@ func TestApplyDesireKeyFromDesire_EmptyDocumentID(t *testing.T) {
 		t.Error("expected error for empty DocumentID")
 	}
 }
-
 
 func TestReadDesireKeyFromDesire(t *testing.T) {
 	d := &kubeapplier.ReadDesire{

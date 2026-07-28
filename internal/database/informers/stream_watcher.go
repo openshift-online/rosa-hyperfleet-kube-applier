@@ -41,10 +41,10 @@ type shardState struct {
 	errorCount    int    // consecutive errors; used for backoff decisions
 }
 
-// shardWorkerState holds the synchronisation handle for a single shard
+// shardWorkerState holds the synchronization handle for a single shard
 // goroutine so the supervisor can gate child shards on parent completion.
 type shardWorkerState struct {
-	done chan struct{} // closed when the goroutine exits (shard fully consumed or ctx cancelled)
+	done chan struct{} // closed when the goroutine exits (shard fully consumed or ctx canceled)
 }
 
 // dynamoDBStreamWatcher implements watch.Interface by tailing a DynamoDB

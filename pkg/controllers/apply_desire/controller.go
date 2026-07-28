@@ -143,7 +143,7 @@ func NewApplyDesireController(
 	return c, nil
 }
 
-// Run starts threadiness workers. It returns when ctx is cancelled.
+// Run starts threadiness workers. It returns when ctx is canceled.
 func (c *ApplyDesireController) Run(ctx context.Context, threadiness int) {
 	defer utilruntime.HandleCrash()
 	defer c.queue.ShutDown()

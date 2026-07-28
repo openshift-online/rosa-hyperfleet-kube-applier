@@ -9,7 +9,7 @@ import (
 )
 
 // rawExtField names — top-level DynamoDB string attributes stored alongside
-// the marshalled desire struct.
+// the marshaled desire struct.
 const (
 	rawExtFieldSpecKubeContent   = "spec_kubeContent"
 	rawExtFieldStatusKubeContent = "status_kubeContent"

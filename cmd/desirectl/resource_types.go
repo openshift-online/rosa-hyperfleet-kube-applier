@@ -49,7 +49,7 @@ func resolveResourceType(input string) (*ResourceInfo, error) {
 	return nil, fmt.Errorf("unknown resource type %q", input)
 }
 
-func resourceTypeFromManifest(apiVersion, kind string) (*ResourceInfo, error) {
+func resourceTypeFromManifest(_ string, kind string) (*ResourceInfo, error) {
 	for i := range knownResources {
 		r := &knownResources[i]
 		if strings.EqualFold(r.Kind, kind) {

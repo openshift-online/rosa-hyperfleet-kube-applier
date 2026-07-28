@@ -77,13 +77,13 @@ func requireIntegration(t *testing.T) (localstackEndpoint, kubeconfigPath string
 
 // fixture holds all wired dependencies for a single test run.
 type fixture struct {
-	dynDB         *dynamodb.Client
-	streamsDB     *dynamodbstreams.Client
-	dbClient      database.KubeApplierDBClient
-	dynKube       dynamic.Interface
+	dynDB          *dynamodb.Client
+	streamsDB      *dynamodbstreams.Client
+	dbClient       database.KubeApplierDBClient
+	dynKube        dynamic.Interface
 	kubeconfigPath string
-	specsPrefix   string
-	statusPrefix  string
+	specsPrefix    string
+	statusPrefix   string
 }
 
 // newFixture creates unique DynamoDB tables (6 total: 3 specs + 3 status) and

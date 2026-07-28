@@ -21,10 +21,10 @@ import (
 )
 
 var (
-	flagAWSRegion      string
-	flagEndpointURL    string
-	flagSpecsPrefix    string
-	flagStatusPrefix   string
+	flagAWSRegion    string
+	flagEndpointURL  string
+	flagSpecsPrefix  string
+	flagStatusPrefix string
 )
 
 func main() {

@@ -118,7 +118,7 @@ func NewReadDesireKubernetesController(
 	return c, nil
 }
 
-// Run starts the per-instance informer and worker. It blocks until ctx is cancelled.
+// Run starts the per-instance informer and worker. It blocks until ctx is canceled.
 func (c *ReadDesireKubernetesController) Run(ctx context.Context) {
 	defer utilruntime.HandleCrash()
 	defer c.queue.ShutDown()

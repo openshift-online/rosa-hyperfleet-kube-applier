@@ -134,9 +134,9 @@ func newTestController(
 	}
 	return &ReadDesireInformerManagingController{
 		specFetcher: &readDesireSpecFetcher{reader: crud},
-		factory: factory,
-		running: map[keys.ReadDesireKey]*runningInstance{},
-		writer:  writer,
+		factory:     factory,
+		running:     map[keys.ReadDesireKey]*runningInstance{},
+		writer:      writer,
 	}
 }
 

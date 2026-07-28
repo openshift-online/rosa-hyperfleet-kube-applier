@@ -6,7 +6,7 @@ import "time"
 // carries. DocumentID is the DynamoDB partition key and is stored as a
 // top-level attribute named "documentID"; the dynamodbav:"-" tag keeps the
 // attributevalue marshaller from double-writing it when the struct is embedded
-// inside a desire type that is marshalled as a whole. Version is the optimistic
+// inside a desire type that is marshaled as a whole. Version is the optimistic
 // concurrency counter: Replace increments it and conditions on the previous
 // value. UpdateTime and CreateTime are stored as ISO-8601 strings via the
 // attributevalue time.Time codec.

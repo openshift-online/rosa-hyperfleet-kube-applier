@@ -82,8 +82,8 @@ type fakeInformer struct {
 	synced  bool
 }
 
-func (f *fakeInformer) GetStore() cache.Store       { return f.indexer }
-func (f *fakeInformer) HasSynced() bool              { return f.synced }
+func (f *fakeInformer) GetStore() cache.Store { return f.indexer }
+func (f *fakeInformer) HasSynced() bool       { return f.synced }
 
 func testConfigMap(name string) *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]any{

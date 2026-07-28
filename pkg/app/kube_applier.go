@@ -30,7 +30,7 @@ const (
 )
 
 // Run serves /healthz and /metrics, then runs the controllers under a
-// leader-election lease. Run returns when ctx is cancelled or leader election
+// leader-election lease. Run returns when ctx is canceled or leader election
 // exits.
 func (o *Options) Run(ctx context.Context) error {
 	logger := klog.FromContext(ctx)

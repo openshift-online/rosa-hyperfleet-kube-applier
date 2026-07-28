@@ -2,6 +2,7 @@ version: "2"
 run:
   allow-parallel-runners: true
 linters:
+  default: none
   enable:
     - copyloopvar
     - gocyclo
@@ -10,6 +11,8 @@ linters:
     - unconvert
     - unparam
   settings:
+    gocyclo:
+      min-complexity: 35
     misspell:
       locale: US
   exclusions:

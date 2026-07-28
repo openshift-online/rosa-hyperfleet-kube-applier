@@ -136,8 +136,8 @@ func terminatingConfigMap(name string) *unstructured.Unstructured {
 		"metadata": map[string]any{
 			"name": name, "namespace": "default",
 			"uid":                        "test-uid-123",
-			"deletionTimestamp":           now.Format(time.RFC3339),
-			"deletionGracePeriodSeconds":  int64(0),
+			"deletionTimestamp":          now.Format(time.RFC3339),
+			"deletionGracePeriodSeconds": int64(0),
 		},
 	}}
 }

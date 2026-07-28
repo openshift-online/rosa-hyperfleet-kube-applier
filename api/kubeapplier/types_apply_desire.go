@@ -47,9 +47,9 @@ type ApplyDesire struct {
 //
 // +k8s:discriminator=Type
 type ApplyDesireSpec struct {
-	ManagementCluster string            `json:"managementCluster"       dynamodbav:"managementCluster"`
-	ClusterID         string            `json:"clusterID"               dynamodbav:"clusterID"`
-	NodePoolName      string            `json:"nodePoolName,omitempty"  dynamodbav:"nodePoolName,omitempty"`
+	ManagementCluster string `json:"managementCluster"       dynamodbav:"managementCluster"`
+	ClusterID         string `json:"clusterID"               dynamodbav:"clusterID"`
+	NodePoolName      string `json:"nodePoolName,omitempty"  dynamodbav:"nodePoolName,omitempty"`
 
 	// Type discriminates the operation: ServerSideApply or Delete.
 	// +k8s:union
@@ -106,4 +106,4 @@ func (d *ApplyDesire) SetSpecKubeContent(ext *runtime.RawExtension) {
 }
 
 func (d *ApplyDesire) GetStatusKubeContent() *runtime.RawExtension  { return nil }
-func (d *ApplyDesire) SetStatusKubeContent(_ *runtime.RawExtension)  {}
+func (d *ApplyDesire) SetStatusKubeContent(_ *runtime.RawExtension) {}
