@@ -90,5 +90,10 @@ func (n *notifyingCRUD[T, PT]) publish(ctx context.Context, documentID string) {
 			"documentID", documentID,
 			"tableSuffix", n.tableSuffix,
 		)
+		return
 	}
+	klog.FromContext(ctx).V(4).Info("Published status SNS notification",
+		"documentID", documentID,
+		"tableSuffix", n.tableSuffix,
+	)
 }
