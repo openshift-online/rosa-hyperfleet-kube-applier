@@ -258,6 +258,38 @@ func TestPoller_TableSuffixVariants(t *testing.T) {
 	}
 }
 
+func TestPoller_UnresolvedPlaceholderDocumentID(t *testing.T) {
+	// If the EventBridge Pipe's input_template was built with jsonencode() instead
+	// of a raw string, the JSONPath placeholder is delivered literally as the
+	// documentID value. The poller must detect and log this without enqueuing.
+	var enqueuedApply []string
+
+	mock := &mockSQSClient{
+		messages: []sqstypes.Message{
+			{
+				Body:          aws.String(`{"documentID":"<$.dynamodb.Keys.documentID.S>","tableSuffix":"-applydesires"}`),
+				ReceiptHandle: aws.String("rh-placeholder"),
+			},
+		},
+	}
+
+	p := New(mock, "https://sqs.test/queue", func(id string) {
+		enqueuedApply = append(enqueuedApply, id)
+	}, func(_ string) {})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	p.Run(ctx)
+
+	if len(enqueuedApply) != 0 {
+		t.Errorf("expected no enqueue for placeholder documentID; got %v", enqueuedApply)
+	}
+	// Message must still be deleted to avoid queue poison.
+	if len(mock.deleteCalls) != 1 || mock.deleteCalls[0] != "rh-placeholder" {
+		t.Errorf("expected placeholder message deleted; deleteCalls=%v", mock.deleteCalls)
+	}
+}
+
 func boolInt(b bool) int {
 	if b {
 		return 1

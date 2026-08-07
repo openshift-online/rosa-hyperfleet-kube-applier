@@ -96,7 +96,7 @@ func (w *writer[T, K, PT]) UpdateStatus(ctx context.Context, key K, mutate Mutat
 	mutate(desired)
 
 	if equality.Semantic.DeepEqual(existing, desired) {
-		klog.FromContext(ctx).V(4).Info("Status unchanged; skipping write and SNS publish",
+		klog.FromContext(ctx).V(4).Info("Status unchanged; skipping write",
 			"key", key,
 		)
 		return nil

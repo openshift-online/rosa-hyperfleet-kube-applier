@@ -244,8 +244,9 @@ func (c *ApplyDesireController) processNext(ctx context.Context) bool {
 	}
 	c.queue.Forget(key)
 	// Safety-net: re-enqueue after 5 minutes so that any spec change missed
-	// during downtime (e.g. between SNS publish and SQS visibility timeout
-	// expiry) is eventually reconciled without waiting for the full resync.
+	// during downtime (e.g. between EventBridge Pipes delivery and SQS
+	// visibility timeout expiry) is eventually reconciled without waiting for
+	// the full resync.
 	c.queue.AddAfter(key, 5*time.Minute)
 	return true
 }

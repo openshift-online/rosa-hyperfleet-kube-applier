@@ -40,9 +40,9 @@ type SQSClient interface {
 	DeleteMessage(ctx context.Context, in *sqs.DeleteMessageInput, opts ...func(*sqs.Options)) (*sqs.DeleteMessageOutput, error)
 }
 
-// SpecNotification is the JSON payload delivered by SNS (via SQS) after the
-// operator writes a desire document to DynamoDB. It matches the message format
-// published by hyperfleet-operator/internal/dynamo/snspublisher.
+// SpecNotification is the JSON payload delivered by EventBridge Pipes (via SQS)
+// after a desire document is written to DynamoDB. The pipe's input_template
+// extracts the partition key and table suffix from the DynamoDB stream record.
 type SpecNotification struct {
 	DocumentID  string `json:"documentID"`
 	TableSuffix string `json:"tableSuffix"` // e.g. "-applydesires" or "-readdesires"
@@ -128,6 +128,21 @@ func (p *Poller) handleMessage(ctx context.Context, logger klog.Logger, body *st
 
 	if notification.DocumentID == "" {
 		logger.Info("Received SQS message with empty documentID; skipping")
+		p.deleteMessage(ctx, logger, receiptHandle)
+		return
+	}
+
+	// Guard against misconfigured EventBridge Pipes input_template: if the pipe's
+	// JSONPath expression was not resolved (e.g. because jsonencode() was used
+	// instead of a raw string template), EventBridge passes the placeholder
+	// through literally. Detect this so the misconfiguration is obvious in logs.
+	if strings.HasPrefix(notification.DocumentID, "<") && strings.HasSuffix(notification.DocumentID, ">") {
+		logger.Error(nil, "documentID looks like an unresolved EventBridge JSONPath placeholder; "+
+			"check that the pipe's input_template uses a raw string (not jsonencode) and that "+
+			"the JSONPath <$.dynamodb.Keys.documentID.S> resolves against the stream record",
+			"documentID", notification.DocumentID,
+			"tableSuffix", notification.TableSuffix,
+		)
 		p.deleteMessage(ctx, logger, receiptHandle)
 		return
 	}
