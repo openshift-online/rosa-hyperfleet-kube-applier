@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic/fake"
 	clienttesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
@@ -1047,5 +1049,149 @@ func TestEnqueueByDocumentID_EmptyID_NoQueue(t *testing.T) {
 
 	if c.queue.Len() != 0 {
 		t.Errorf("expected 0 items for empty documentID, got %d", c.queue.Len())
+	}
+}
+
+// =============================================================================
+// TestFullResync_EndToEnd_NoSQS
+//
+// Verifies the full path:
+//
+//	re-List fires → handleAdd → queue → SyncOnce → SSA patch on fake dynamic client
+//
+// No SQS is involved. The item is written to the "database" (FakeCRUD) AFTER
+// the informer has completed its initial sync, and is only discovered when the
+// fake watcher stops and the reflector re-Lists.
+// =============================================================================
+
+// noWatchListLW wraps a *cache.ListWatch and opts out of the WatchList
+// streaming mode introduced in client-go v0.35+. Without this the reflector
+// waits for a bookmark event that the fake watcher never emits, so it would
+// never reach Synced.
+type noWatchListLW struct{ *cache.ListWatch }
+
+func (noWatchListLW) IsWatchListSemanticsUnSupported() bool { return true }
+
+func TestFullResync_EndToEnd_NoSQS(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	const (
+		documentID = "cluster1--resync-cm"
+		cmName     = "resync-cm"
+	)
+
+	// ---- spec store: FakeCRUD acting as SpecReader ----
+	specCRUD := listertesting.NewFakeCRUD[kubeapplier.ApplyDesire, *kubeapplier.ApplyDesire]()
+	statusCRUD := listertesting.NewFakeCRUD[kubeapplier.ApplyDesire, *kubeapplier.ApplyDesire]()
+
+	// ---- pre-populate one item for the INITIAL scan so the informer syncs ----
+	item0 := newApplyDesire(t, "initial-cm", configMapTarget("initial-cm"), validConfigMapJSON("initial-cm"))
+	if _, err := specCRUD.Create(ctx, item0); err != nil {
+		t.Fatalf("create item0: %v", err)
+	}
+
+	// ---- the new item that will appear only on the SECOND scan ----
+	item1 := newApplyDesire(t, cmName, configMapTarget(cmName), validConfigMapJSON(cmName))
+	item1.SetDocumentID(documentID)
+	// Also insert item1 into specCRUD so that SyncOnce (called by the
+	// controller after handleAdd enqueues the key) can fetch its spec.
+	if _, err := specCRUD.Create(ctx, item1); err != nil {
+		t.Fatalf("create item1 in specCRUD: %v", err)
+	}
+
+	// ---- listFn counts calls and injects item1 from call #2 onward ----
+	var listCallsMu sync.Mutex
+	listCalls := 0
+
+	listFn := func(_ context.Context) (runtime.Object, error) {
+		listCallsMu.Lock()
+		listCalls++
+		call := listCalls
+		listCallsMu.Unlock()
+
+		list := &kubeapplier.ApplyDesireList{}
+		list.ResourceVersion = "0"
+		list.Items = append(list.Items, *item0)
+		if call >= 2 {
+			list.Items = append(list.Items, *item1)
+		}
+		return list, nil
+	}
+
+	// ---- build a SharedIndexInformer with a very short fullResyncPeriod ----
+	const fullResyncPeriod = 150 * time.Millisecond
+	lw := &cache.ListWatch{
+		ListWithContextFunc: func(lctx context.Context, _ metav1.ListOptions) (runtime.Object, error) {
+			return listFn(lctx)
+		},
+		WatchFuncWithContext: func(wctx context.Context, _ metav1.ListOptions) (watch.Interface, error) {
+			fw := watch.NewFake()
+			go func() {
+				select {
+				case <-wctx.Done():
+				case <-time.After(fullResyncPeriod):
+				}
+				fw.Stop()
+			}()
+			return fw, nil
+		},
+	}
+	inf := cache.NewSharedIndexInformerWithOptions(
+		&noWatchListLW{lw},
+		&kubeapplier.ApplyDesire{},
+		cache.SharedIndexInformerOptions{ResyncPeriod: 30 * time.Second},
+	)
+
+	// ---- fake dynamic client with a patch reactor ----
+	gvr := schema.GroupVersionResource{Version: "v1", Resource: "configmaps"}
+	dyn := fakeDynamic(t, map[schema.GroupVersionResource]string{gvr: "ConfigMapList"})
+
+	patchedNames := make(chan string, 10)
+	dyn.PrependReactor("patch", "configmaps", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		pa := action.(clienttesting.PatchAction)
+		patchedNames <- pa.GetName()
+		return true, &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": "v1", "kind": "ConfigMap",
+			"metadata": map[string]any{"name": pa.GetName(), "namespace": "default"},
+		}}, nil
+	})
+
+	// ---- wire the controller ----
+	ctrl, err := NewApplyDesireController(
+		inf,
+		dyn,
+		specCRUD,
+		statusCRUD,
+		Config{
+			CooldownPeriod:       1 * time.Millisecond, // near-zero to avoid cooldown interference
+			DeleteCooldownPeriod: 1 * time.Millisecond,
+		},
+	)
+	if err != nil {
+		t.Fatalf("NewApplyDesireController: %v", err)
+	}
+
+	// ---- start informer and controller ----
+	go inf.RunWithContext(ctx)
+	if !cache.WaitForCacheSync(ctx.Done(), inf.HasSynced) {
+		t.Fatal("informer did not sync on initial list")
+	}
+
+	go ctrl.Run(ctx, 1)
+
+	// ---- wait for re-List to fire and item1 to be SSA-patched ----
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case name := <-patchedNames:
+			if name == cmName {
+				// Success: the post-startup item was discovered via re-List and applied.
+				return
+			}
+			// initial-cm patch: keep waiting for cmName
+		case <-deadline:
+			t.Fatalf("timed out: SSA patch for %q never reached the fake dynamic client", cmName)
+		}
 	}
 }

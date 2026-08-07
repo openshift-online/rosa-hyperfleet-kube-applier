@@ -12,6 +12,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	dbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/cache"
 
 	kubeapplier "github.com/rrp-bot/rosa-hyperfleet-kube-applier/api/kubeapplier"
@@ -104,6 +105,72 @@ func TestReadDesireListerFromPopulatedCache(t *testing.T) {
 	}
 	if len(items) != 1 {
 		t.Errorf("List returned %d items, want 1", len(items))
+	}
+}
+
+// TestFullResyncTriggersReList verifies that when the fake watcher stops after
+// fullResyncPeriod, the reflector re-issues a List call (full DynamoDB rescan).
+// This is the mechanism that catches items whose SQS notification was missed.
+// We use a short fullResyncPeriod (100ms) and a mock listFn that counts calls
+// and returns a new item on the second invocation.
+func TestFullResyncTriggersReList(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	listCalls := 0
+	item1 := &kubeapplier.ApplyDesire{
+		DynamoDBMetadata: kubeapplier.DynamoDBMetadata{DocumentID: "initial-item"},
+	}
+	item2 := &kubeapplier.ApplyDesire{
+		DynamoDBMetadata: kubeapplier.DynamoDBMetadata{DocumentID: "post-startup-item"},
+	}
+
+	listFn := func(_ context.Context) (runtime.Object, error) {
+		listCalls++
+		list := &kubeapplier.ApplyDesireList{}
+		list.ResourceVersion = "0"
+		list.Items = append(list.Items, *item1)
+		if listCalls >= 2 {
+			// Simulate a new item written to DynamoDB after the initial scan.
+			list.Items = append(list.Items, *item2)
+		}
+		return list, nil
+	}
+
+	inf := newDesireInformer(
+		nil, "",
+		&kubeapplier.ApplyDesire{},
+		listFn,
+		30*time.Second,
+		100*time.Millisecond, // short fullResyncPeriod for testing
+	)
+
+	go inf.RunWithContext(ctx)
+	if !cache.WaitForCacheSync(ctx.Done(), inf.HasSynced) {
+		t.Fatal("informer did not sync on first List")
+	}
+
+	// After the initial sync the cache should have item1 only.
+	if got := len(inf.GetStore().List()); got != 1 {
+		t.Fatalf("after initial sync: cache has %d items, want 1", got)
+	}
+
+	// Wait for the watcher to stop and the reflector to re-List (up to 3s).
+	deadline := time.After(3 * time.Second)
+	for {
+		if len(inf.GetStore().List()) == 2 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for re-List to populate post-startup item; listCalls=%d cache=%d",
+				listCalls, len(inf.GetStore().List()))
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+
+	if listCalls < 2 {
+		t.Errorf("expected at least 2 List calls (initial + re-List); got %d", listCalls)
 	}
 }
 
@@ -211,7 +278,7 @@ func TestIntegration_InformerSyncsExistingDocuments(t *testing.T) {
 		}
 	}
 
-	info := NewKubeApplierInformersWithResyncPeriod(dbClient, prefix, 30*time.Second)
+	info := NewKubeApplierInformersWithResyncPeriod(dbClient, prefix, 30*time.Second, 5*time.Minute)
 	startAndSync(t, ctx, info)
 
 	applyInf, applyLister := info.ApplyDesires()
@@ -252,8 +319,8 @@ func TestIntegration_PerTableIsolation(t *testing.T) {
 
 	dbCRUDA := database.NewDynamoDBKubeApplierDBClient(dbClient, dbClient, prefixA, prefixA)
 
-	infoA := NewKubeApplierInformersWithResyncPeriod(dbClient, prefixA, 30*time.Second)
-	infoB := NewKubeApplierInformersWithResyncPeriod(dbClient, prefixB, 30*time.Second)
+	infoA := NewKubeApplierInformersWithResyncPeriod(dbClient, prefixA, 30*time.Second, 5*time.Minute)
+	infoB := NewKubeApplierInformersWithResyncPeriod(dbClient, prefixB, 30*time.Second, 5*time.Minute)
 	startAndSync(t, ctx, infoA)
 	startAndSync(t, ctx, infoB)
 

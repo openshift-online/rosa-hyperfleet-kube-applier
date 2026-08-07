@@ -190,12 +190,21 @@ func createTable(t *testing.T, dbClient *dynamodb.Client, tableName string) {
 // error when the app exits.
 func startApp(t *testing.T, f *fixture) (context.CancelFunc, <-chan error) {
 	t.Helper()
+	return startAppWithFullResync(t, f, 30*time.Second)
+}
+
+// startAppWithFullResync is like startApp but accepts a custom fullResyncPeriod
+// so tests that need a faster re-List cycle (e.g. post-startup write tests)
+// can pass a shorter duration without affecting the other tests.
+func startAppWithFullResync(t *testing.T, f *fixture, fullResyncPeriod time.Duration) (context.CancelFunc, <-chan error) {
+	t.Helper()
 
 	reg := prometheus.NewRegistry()
 
 	inf := informers.NewKubeApplierInformersWithResyncPeriod(
 		f.dynDB, f.specsPrefix,
 		5*time.Second,
+		fullResyncPeriod,
 	)
 
 	restCfg, err := clientcmd.BuildConfigFromFlags("", f.kubeconfigPath)
@@ -687,4 +696,95 @@ func TestIntegration_OptimisticConcurrency(t *testing.T) {
 			precondFailed, r1.err, r2.err)
 	}
 	t.Logf("optimistic concurrency: exactly one Replace won, one got ErrPreconditionFailed")
+}
+
+// TestIntegration_FullResync_PostStartup verifies that an ApplyDesire written
+// to DynamoDB AFTER the app has started (and with NO SQS notification sent) is
+// eventually reconciled via the periodic re-List mechanism.
+//
+// This exercises the coverage gap: the full path
+//
+//	re-List → handleAdd → queue → SyncOnce → SSA apply → ConfigMap on Kind
+//
+// without any SQS involvement.
+func TestIntegration_FullResync_PostStartup(t *testing.T) {
+	localstackEndpoint, kubeconfigPath := requireIntegration(t)
+	f := newFixture(t, localstackEndpoint, kubeconfigPath)
+
+	const (
+		documentID = "inttest--fullresync-cm"
+		cmName     = "inttest-fullresync-cm"
+		namespace  = "default"
+	)
+	const fullResyncPeriod = 5 * time.Second
+
+	// Ensure ConfigMap doesn't exist from a previous run.
+	_ = f.dynKube.Resource(configMapGVR).Namespace(namespace).Delete(
+		context.Background(), cmName, metav1.DeleteOptions{})
+
+	// Start the app with a short fullResyncPeriod (5s) so the test completes quickly.
+	cancel, errCh := startAppWithFullResync(t, f, fullResyncPeriod)
+	t.Cleanup(func() {
+		cancel()
+		<-errCh
+	})
+	t.Cleanup(func() {
+		_ = f.dynKube.Resource(configMapGVR).Namespace(namespace).Delete(
+			context.Background(), cmName, metav1.DeleteOptions{})
+	})
+
+	// Wait for the app to reach a running state by giving it time to complete
+	// its initial DynamoDB scan and leader election.
+	time.Sleep(3 * time.Second)
+
+	// Write the ApplyDesire spec AFTER the app is running, and do NOT send
+	// any SQS notification. The controller must discover it via re-List alone.
+	cmJSON, err := json.Marshal(map[string]interface{}{
+		"apiVersion": "v1",
+		"kind":       "ConfigMap",
+		"metadata":   map[string]interface{}{"name": cmName, "namespace": namespace},
+		"data":       map[string]interface{}{"source": "fullresync"},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal ConfigMap: %v", err)
+	}
+
+	writeApplyDesireSpec(t, f.dynDB, f.specsPrefix, &kubeapplier.ApplyDesire{
+		DynamoDBMetadata: kubeapplier.DynamoDBMetadata{DocumentID: documentID},
+		Spec: kubeapplier.ApplyDesireSpec{
+			ManagementCluster: "inttest",
+			ClusterID:         "inttest",
+			TargetItem: kubeapplier.ResourceReference{
+				Version:   "v1",
+				Resource:  "configmaps",
+				Namespace: namespace,
+				Name:      cmName,
+			},
+			ServerSideApply: &kubeapplier.ServerSideApplyConfig{KubeContent: &runtime.RawExtension{Raw: cmJSON}},
+		},
+	})
+
+	// The spec was written without an SQS notification. The controller must
+	// discover it when the next fullResync fires (≤ fullResyncSecs after write)
+	// and apply it. Poll for up to fullResyncSecs + generous buffer (60s total).
+	pollUntil(t, 60*time.Second, func() bool {
+		obj, _ := getConfigMap(f.dynKube, namespace, cmName)
+		return obj != nil
+	})
+	t.Logf("ConfigMap %s/%s created via fullResync re-List (no SQS notification sent)", namespace, cmName)
+
+	// Also assert status shows Successful=True.
+	pollUntil(t, 30*time.Second, func() bool {
+		status, err := f.dbClient.ApplyDesireStatus().Get(context.Background(), documentID)
+		if err != nil {
+			return false
+		}
+		for _, c := range status.Status.Conditions {
+			if c.Type == kubeapplier.ConditionTypeSuccessful && c.Status == metav1.ConditionTrue {
+				return true
+			}
+		}
+		return false
+	})
+	t.Logf("ApplyDesire (fullResync) status Successful=True in DynamoDB")
 }

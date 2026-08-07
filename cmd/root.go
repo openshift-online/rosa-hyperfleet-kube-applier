@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -37,6 +38,7 @@ type KubeApplierRootCmdFlags struct {
 	ExitOnPanic                bool
 	KubeQPS                    float32
 	KubeBurst                  int
+	FullResyncPeriod           time.Duration
 }
 
 func (f *KubeApplierRootCmdFlags) AddFlags(cmd *cobra.Command) {
@@ -70,6 +72,10 @@ func (f *KubeApplierRootCmdFlags) AddFlags(cmd *cobra.Command) {
 		"Maximum QPS to the kube-apiserver from the dynamic client.")
 	cmd.Flags().IntVar(&f.KubeBurst, "kube-burst", f.KubeBurst,
 		"Maximum burst for throttle on requests to the kube-apiserver from the dynamic client.")
+	cmd.Flags().DurationVar(&f.FullResyncPeriod, "full-resync-period", f.FullResyncPeriod,
+		"How often the informer performs a full DynamoDB rescan to catch items missed by SQS. "+
+			"The reflector re-Lists all desires from DynamoDB at this interval, ensuring any item "+
+			"whose SQS notification was lost is eventually reconciled without a pod restart. (default 5m)")
 
 	for _, name := range []string{"namespace", "management-cluster", "aws-region", "sqs-queue-url"} {
 		if err := cmd.MarkFlagRequired(name); err != nil {
@@ -136,7 +142,7 @@ func (f *KubeApplierRootCmdFlags) ToKubeApplierOptions(ctx context.Context) (*ap
 	sqsClient := app.NewSQSClient(awsCfg)
 
 	dbClient := database.NewDynamoDBKubeApplierDBClient(specsClient, statusClient, specsPrefix, statusPrefix)
-	dynamoDBInformers := informers.NewKubeApplierInformers(specsClient, specsPrefix)
+	dynamoDBInformers := informers.NewKubeApplierInformers(specsClient, specsPrefix, f.FullResyncPeriod)
 
 	dyn, err := app.NewDynamicClient(kubeconfig, f.KubeQPS, f.KubeBurst)
 	if err != nil {
@@ -166,6 +172,7 @@ func NewKubeApplierRootCmdFlags() *KubeApplierRootCmdFlags {
 		ExitOnPanic:                true,
 		KubeQPS:                    250,
 		KubeBurst:                  500,
+		FullResyncPeriod:           5 * time.Minute,
 	}
 }
 

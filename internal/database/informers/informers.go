@@ -18,6 +18,11 @@ import (
 
 const defaultResyncPeriod = 30 * time.Second
 
+// defaultFullResyncPeriod is the interval at which the fake watcher is stopped
+// so the reflector re-Lists all desires from DynamoDB. This ensures items whose
+// SQS notification was missed are eventually reconciled without a pod restart.
+const defaultFullResyncPeriod = 5 * time.Minute
+
 type KubeApplierInformers interface {
 	ApplyDesires() (cache.SharedIndexInformer, listers.ApplyDesireLister)
 	ReadDesires() (cache.SharedIndexInformer, listers.ReadDesireLister)
@@ -32,22 +37,29 @@ type kubeApplierInformers struct {
 }
 
 // NewKubeApplierInformers creates informers that populate their caches from a
-// full DynamoDB Scan on startup. Incremental change notification is handled by
-// the SQS poller (see internal/database/sqspoller), not by DynamoDB Streams.
+// full DynamoDB Scan on startup and re-scan periodically (every fullResyncPeriod)
+// to catch any items whose SQS notification was missed. Incremental change
+// notification between rescans is handled by the SQS poller.
 // specsClient is the DynamoDB client for the specs tables. specsPrefix is the
 // table name prefix (full table names are prefix + "-applydesires" / "-readdesires").
+// If fullResyncPeriod is zero, defaultFullResyncPeriod (5 minutes) is used.
 func NewKubeApplierInformers(
 	specsClient *dynamodb.Client,
 	specsPrefix string,
+	fullResyncPeriod time.Duration,
 ) KubeApplierInformers {
-	return NewKubeApplierInformersWithResyncPeriod(specsClient, specsPrefix, defaultResyncPeriod)
+	return NewKubeApplierInformersWithResyncPeriod(specsClient, specsPrefix, defaultResyncPeriod, fullResyncPeriod)
 }
 
 func NewKubeApplierInformersWithResyncPeriod(
 	specsClient *dynamodb.Client,
 	specsPrefix string,
 	resyncPeriod time.Duration,
+	fullResyncPeriod time.Duration,
 ) KubeApplierInformers {
+	if fullResyncPeriod == 0 {
+		fullResyncPeriod = defaultFullResyncPeriod
+	}
 	applyTable := specsPrefix + database.TableSuffixApplyDesires
 	readTable := specsPrefix + database.TableSuffixReadDesires
 
@@ -69,6 +81,7 @@ func NewKubeApplierInformersWithResyncPeriod(
 			return list, nil
 		},
 		resyncPeriod,
+		fullResyncPeriod,
 	)
 
 	readInf := newDesireInformer(
@@ -89,6 +102,7 @@ func NewKubeApplierInformersWithResyncPeriod(
 			return list, nil
 		},
 		resyncPeriod,
+		fullResyncPeriod,
 	)
 
 	return &kubeApplierInformers{
@@ -115,20 +129,25 @@ func newDesireInformer(
 	exampleObj runtime.Object,
 	listFn func(context.Context) (runtime.Object, error),
 	resyncPeriod time.Duration,
+	fullResyncPeriod time.Duration,
 ) cache.SharedIndexInformer {
 	lw := &cache.ListWatch{
 		ListWithContextFunc: func(ctx context.Context, _ metav1.ListOptions) (runtime.Object, error) {
 			return listFn(ctx)
 		},
-		// WatchFuncWithContext returns a no-op watcher that blocks until ctx is
-		// cancelled. Incremental updates are driven by the SQS poller which
-		// enqueues directly into the controller workqueue — not through the
-		// informer cache. The informer cache is populated once by the List
-		// (full Scan) above and then remains a stable snapshot.
+		// WatchFuncWithContext returns a fake watcher that stops itself after
+		// fullResyncPeriod. When it stops, client-go's reflector treats the
+		// closed channel as a normal watch termination and immediately re-Lists,
+		// issuing a fresh full DynamoDB Scan. This is the mechanism by which
+		// items added to DynamoDB after startup (and whose SQS notification was
+		// missed) are eventually discovered without a pod restart.
 		WatchFuncWithContext: func(ctx context.Context, _ metav1.ListOptions) (watch.Interface, error) {
 			fw := watch.NewFake()
 			go func() {
-				<-ctx.Done()
+				select {
+				case <-ctx.Done():
+				case <-time.After(fullResyncPeriod):
+				}
 				fw.Stop()
 			}()
 			return fw, nil
