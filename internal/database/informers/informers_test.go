@@ -390,7 +390,7 @@ func TestIntegration_InformerSyncsExistingDocuments(t *testing.T) {
 		}
 	}
 
-	info := NewKubeApplierInformersWithResyncPeriod(dbClient, streamsClient, prefix, 30*time.Second)
+	info := NewKubeApplierInformersWithResyncPeriod(dbClient, streamsClient, prefix, 30*time.Second, 5*time.Minute)
 	startAndSync(t, ctx, info)
 
 	applyInf, applyLister := info.ApplyDesires()
@@ -431,7 +431,7 @@ func TestIntegration_StreamDeliversEvents(t *testing.T) {
 	dbCRUD := database.NewDynamoDBKubeApplierDBClient(dbClient, dbClient, prefix, prefix)
 	crud := dbCRUD.ApplyDesireStatus()
 
-	info := NewKubeApplierInformersWithResyncPeriod(dbClient, streamsClient, prefix, 30*time.Second)
+	info := NewKubeApplierInformersWithResyncPeriod(dbClient, streamsClient, prefix, 30*time.Second, 5*time.Minute)
 	startAndSync(t, ctx, info)
 
 	applyInf, _ := info.ApplyDesires()
@@ -500,8 +500,8 @@ func TestIntegration_PerTableIsolation(t *testing.T) {
 
 	dbCRUDA := database.NewDynamoDBKubeApplierDBClient(dbClient, dbClient, prefixA, prefixA)
 
-	infoA := NewKubeApplierInformersWithResyncPeriod(dbClient, streamsClient, prefixA, 30*time.Second)
-	infoB := NewKubeApplierInformersWithResyncPeriod(dbClient, streamsClient, prefixB, 30*time.Second)
+	infoA := NewKubeApplierInformersWithResyncPeriod(dbClient, streamsClient, prefixA, 30*time.Second, 5*time.Minute)
+	infoB := NewKubeApplierInformersWithResyncPeriod(dbClient, streamsClient, prefixB, 30*time.Second, 5*time.Minute)
 	startAndSync(t, ctx, infoA)
 	startAndSync(t, ctx, infoB)
 

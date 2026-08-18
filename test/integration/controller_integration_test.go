@@ -182,7 +182,7 @@ func startApp(t *testing.T, f *fixture) (context.CancelFunc, <-chan error) {
 
 	inf := informers.NewKubeApplierInformersWithResyncPeriod(
 		f.dynDB, f.streamsDB, f.specsPrefix,
-		5*time.Second,
+		5*time.Second, 5*time.Minute,
 	)
 
 	restCfg, err := clientcmd.BuildConfigFromFlags("", f.kubeconfigPath)
