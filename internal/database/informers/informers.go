@@ -20,6 +20,12 @@ import (
 
 const defaultResyncPeriod = 30 * time.Second
 
+// defaultFullResyncPeriod is the interval at which the Streams watcher is
+// stopped so the reflector re-Lists all desires from DynamoDB. This ensures
+// items whose stream notification was missed are eventually reconciled without
+// a pod restart.
+const defaultFullResyncPeriod = 5 * time.Minute
+
 type KubeApplierInformers interface {
 	ApplyDesires() (cache.SharedIndexInformer, listers.ApplyDesireLister)
 	ReadDesires() (cache.SharedIndexInformer, listers.ReadDesireLister)
@@ -43,7 +49,7 @@ func NewKubeApplierInformers(
 	streamsClient *dynamodbstreams.Client,
 	specsPrefix string,
 ) KubeApplierInformers {
-	return NewKubeApplierInformersWithResyncPeriod(specsClient, streamsClient, specsPrefix, defaultResyncPeriod)
+	return NewKubeApplierInformersWithResyncPeriod(specsClient, streamsClient, specsPrefix, defaultResyncPeriod, defaultFullResyncPeriod)
 }
 
 func NewKubeApplierInformersWithResyncPeriod(
@@ -51,7 +57,11 @@ func NewKubeApplierInformersWithResyncPeriod(
 	streamsClient *dynamodbstreams.Client,
 	specsPrefix string,
 	resyncPeriod time.Duration,
+	fullResyncPeriod time.Duration,
 ) KubeApplierInformers {
+	if fullResyncPeriod == 0 {
+		fullResyncPeriod = defaultFullResyncPeriod
+	}
 	applyTable := specsPrefix + database.TableSuffixApplyDesires
 	readTable := specsPrefix + database.TableSuffixReadDesires
 
@@ -78,6 +88,7 @@ func NewKubeApplierInformersWithResyncPeriod(
 			return list, nil
 		},
 		resyncPeriod,
+		fullResyncPeriod,
 	)
 
 	readInf := newDesireInformer(
@@ -102,6 +113,7 @@ func NewKubeApplierInformersWithResyncPeriod(
 			return list, nil
 		},
 		resyncPeriod,
+		fullResyncPeriod,
 	)
 
 	return &kubeApplierInformers{
@@ -120,13 +132,28 @@ func newDesireInformer(
 	streamConvertFn func(map[string]streamtypes.AttributeValue) (runtime.Object, error),
 	listFn func(context.Context) (runtime.Object, error),
 	resyncPeriod time.Duration,
+	fullResyncPeriod time.Duration,
 ) cache.SharedIndexInformer {
 	lw := &cache.ListWatch{
 		ListWithContextFunc: func(ctx context.Context, _ metav1.ListOptions) (runtime.Object, error) {
 			return listFn(ctx)
 		},
-		WatchFuncWithContext: func(ctx context.Context, _ metav1.ListOptions) (watch.Interface, error) {
-			return newDynamoDBStreamWatcher(ctx, dbClient, streamsClient, tableName, streamConvertFn), nil
+		// WatchFuncWithContext returns the real DynamoDB Streams watcher, but
+		// wraps it so it is stopped after fullResyncPeriod. When it stops,
+		// client-go's reflector treats the closed channel as a normal watch
+		// termination and immediately re-Lists, issuing a fresh full DynamoDB
+		// Scan. This ensures items whose stream notification was missed are
+		// eventually discovered without a pod restart.
+		WatchFuncWithContext: func(ctx context.Context, opts metav1.ListOptions) (watch.Interface, error) {
+			w := newDynamoDBStreamWatcher(ctx, dbClient, streamsClient, tableName, streamConvertFn)
+			go func() {
+				select {
+				case <-ctx.Done():
+				case <-time.After(fullResyncPeriod):
+					w.Stop()
+				}
+			}()
+			return w, nil
 		},
 	}
 	return cache.NewSharedIndexInformerWithOptions(

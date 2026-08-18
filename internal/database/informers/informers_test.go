@@ -14,6 +14,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	dbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodbstreams"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/tools/cache"
 
@@ -191,6 +193,90 @@ func TestReadDesireListerFromPopulatedCache(t *testing.T) {
 	}
 	if len(items) != 1 {
 		t.Errorf("List returned %d items, want 1", len(items))
+	}
+}
+
+// TestFullResyncTriggersReList verifies that when the timed-stop goroutine
+// fires after fullResyncPeriod the reflector re-issues a List call, picking up
+// items that were added to DynamoDB after the initial scan (i.e. items whose
+// stream notification was missed). We use a very short fullResyncPeriod
+// (100ms) and a mock listFn that injects a second item on the second call.
+func TestFullResyncTriggersReList(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	const fullResyncPeriod = 100 * time.Millisecond
+
+	listCalls := 0
+	item1 := &kubeapplier.ApplyDesire{
+		DynamoDBMetadata: kubeapplier.DynamoDBMetadata{DocumentID: "initial-item"},
+	}
+	item2 := &kubeapplier.ApplyDesire{
+		DynamoDBMetadata: kubeapplier.DynamoDBMetadata{DocumentID: "post-startup-item"},
+	}
+
+	listFn := func(_ context.Context) (runtime.Object, error) {
+		listCalls++
+		list := &kubeapplier.ApplyDesireList{}
+		list.ResourceVersion = "0"
+		list.Items = append(list.Items, *item1)
+		if listCalls >= 2 {
+			// Simulate an item written to DynamoDB after the initial scan
+			// whose stream notification was missed.
+			list.Items = append(list.Items, *item2)
+		}
+		return list, nil
+	}
+
+	// Build the ListWatch the same way newDesireInformer does, but using a
+	// nil Streams watcher that stops itself after fullResyncPeriod.
+	lw := &cache.ListWatch{
+		ListWithContextFunc: func(lctx context.Context, _ metav1.ListOptions) (runtime.Object, error) {
+			return listFn(lctx)
+		},
+		WatchFuncWithContext: func(wctx context.Context, _ metav1.ListOptions) (watch.Interface, error) {
+			fw := watch.NewFake()
+			go func() {
+				select {
+				case <-wctx.Done():
+				case <-time.After(fullResyncPeriod):
+					fw.Stop()
+				}
+			}()
+			return fw, nil
+		},
+	}
+	inf := cache.NewSharedIndexInformerWithOptions(
+		&listWatchWithoutWatchListSemantics{lw},
+		&kubeapplier.ApplyDesire{},
+		cache.SharedIndexInformerOptions{ResyncPeriod: 30 * time.Second},
+	)
+
+	go inf.RunWithContext(ctx)
+	if !cache.WaitForCacheSync(ctx.Done(), inf.HasSynced) {
+		t.Fatal("informer did not sync on first List")
+	}
+
+	if got := len(inf.GetStore().List()); got != 1 {
+		t.Fatalf("after initial sync: cache has %d items, want 1", got)
+	}
+
+	// Wait for the watcher to stop and the reflector to re-List (up to 3s).
+	deadline := time.After(3 * time.Second)
+	for {
+		if len(inf.GetStore().List()) == 2 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for re-List to populate post-startup item; listCalls=%d cache=%d",
+				listCalls, len(inf.GetStore().List()))
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+
+	if listCalls < 2 {
+		t.Errorf("expected at least 2 List calls (initial + re-List); got %d", listCalls)
 	}
 }
 
