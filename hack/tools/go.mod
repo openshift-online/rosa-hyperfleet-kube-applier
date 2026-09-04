@@ -1,6 +1,6 @@
 module github.com/openshift-online/rosa-hyperfleet-kube-applier/hack/tools
 
-go 1.26.3
+go 1.27.0
 
 require github.com/golangci/golangci-lint/v2 v2.13.2
 
@@ -27,7 +27,7 @@ require (
 	github.com/MirrexOne/unqueryvet v1.5.4 // indirect
 	github.com/OpenPeeDeeP/depguard/v2 v2.2.1 // indirect
 	github.com/alecthomas/chroma/v2 v2.27.0 // indirect
-	github.com/alecthomas/go-check-sumtype v0.4.0 // indirect
+	github.com/alecthomas/go-check-sumtype v0.5.0 // indirect
 	github.com/alexkohler/nakedret/v2 v2.0.6 // indirect
 	github.com/alexkohler/prealloc v1.1.0 // indirect
 	github.com/alfatraining/structtag v1.0.0 // indirect
@@ -141,8 +141,8 @@ require (
 	github.com/nunnatsa/ginkgolinter v0.24.0 // indirect
 	github.com/pelletier/go-toml/v2 v2.4.3 // indirect
 	github.com/prometheus/client_golang v1.24.1 // indirect
-	github.com/prometheus/client_model v0.6.2 // indirect
-	github.com/prometheus/common v0.70.1 // indirect
+	github.com/prometheus/client_model v0.6.3 // indirect
+	github.com/prometheus/common v0.71.0 // indirect
 	github.com/prometheus/procfs v0.22.0 // indirect
 	github.com/quasilyte/go-ruleguard v0.4.5 // indirect
 	github.com/quasilyte/go-ruleguard/dsl v0.3.23 // indirect
@@ -176,7 +176,7 @@ require (
 	github.com/stretchr/testify v1.12.1 // indirect
 	github.com/subosito/gotenv v1.6.0 // indirect
 	github.com/tetafro/godot v1.5.6 // indirect
-	github.com/timakin/bodyclose v0.0.0-20260129054331-73d1f95b84b4 // indirect
+	github.com/timakin/bodyclose v0.0.0-20260723120731-857993a2939c // indirect
 	github.com/timonwong/loggercheck v0.12.0 // indirect
 	github.com/tomarrell/wrapcheck/v2 v2.12.0 // indirect
 	github.com/tommy-muehle/go-mnd/v2 v2.5.1 // indirect
@@ -195,7 +195,7 @@ require (
 	go.augendre.info/arangolint v0.4.0 // indirect
 	go.augendre.info/fatcontext v0.10.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
-	go.uber.org/zap v1.27.0 // indirect
+	go.uber.org/zap v1.28.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	golang.org/x/exp/typeparams v0.0.0-20260824195058-e88cd73687aa // indirect
 	golang.org/x/mod v0.40.0 // indirect
