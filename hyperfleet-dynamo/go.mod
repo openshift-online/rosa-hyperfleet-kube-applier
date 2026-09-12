@@ -1,6 +1,6 @@
 module github.com/openshift-online/rosa-hyperfleet-kube-applier/hyperfleet-dynamo
 
-go 1.26.3
+go 1.27
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.46.0
