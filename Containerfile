@@ -1,7 +1,6 @@
-FROM registry.access.redhat.com/ubi9/ubi-minimal:9.8-1788939036 AS builder
+FROM registry.access.redhat.com/ubi8/go-toolset:1788328999 AS builder
 
 USER root
-RUN microdnf install -y golang git && microdnf clean all
 
 WORKDIR /app
 COPY go.mod go.sum ./
