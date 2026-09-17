@@ -1,4 +1,4 @@
-FROM registry.access.redhat.com/ubi9/ubi-minimal:9.8-1789460941 AS builder
+FROM registry.access.redhat.com/ubi9/ubi-minimal:9.8-1789546276 AS builder
 
 USER root
 RUN microdnf install -y golang git && microdnf clean all
@@ -10,7 +10,7 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -o /kube-applier-aws .
 
-FROM registry.access.redhat.com/ubi9/ubi-minimal:9.8-1789460941
+FROM registry.access.redhat.com/ubi9/ubi-minimal:9.8-1789546276
 COPY --from=builder /kube-applier-aws /kube-applier-aws
 USER 65532:65532
 ENTRYPOINT ["/kube-applier-aws"]
