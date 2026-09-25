@@ -57,6 +57,11 @@
       ]
     },
     {
+      "description": "Do not propose Go modules that require a newer toolchain than go.mod",
+      "matchManagers": ["gomod"],
+      "constraintsFiltering": "strict"
+    },
+    {
       "description": "Batch + automerge patch/minor/digest Go module updates when Prow + Konflux pass",
       "matchManagers": ["gomod"],
       "matchUpdateTypes": ["patch", "minor", "pin", "digest"],
