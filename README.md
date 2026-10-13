@@ -13,6 +13,27 @@ At a high level:
    The observed content is written to `.status.kubeContent`.
    Success/failure is written to `.status.conditions["Successful"]`.
 
+## FIPS-compatible container build
+
+`make image` and the CI image builds use `Containerfile`. The Red Hat Go
+toolset builds a static binary with `CGO_ENABLED=0`, `GOFIPS140=certified`,
+`GOEXPERIMENT=strictfipsruntime`, and the `no_openssl` build tag. This selects
+Go's native FIPS cryptographic module without an OpenSSL runtime dependency.
+The pinned builder currently resolves `certified` to module `v1.0.0`.
+
+The pinned downstream toolchain compiles in `GODEBUG=fips140=auto`: FIPS mode
+activates on a FIPS-enabled host, but is disabled on a non-FIPS host. Operators
+can explicitly enable it with `GODEBUG=fips140=on`. A runtime `GODEBUG` override
+takes precedence; `strictfipsruntime` rejects disabling FIPS mode on a
+FIPS-enabled host. `GODEBUG=fips140=only` is intended for assessment and testing,
+not production. Local `make build` uses the developer's Go toolchain and does
+not apply these container-specific build settings.
+
+See the [Go FIPS documentation](https://go.dev/doc/security/fips140) and the
+[downstream Go toolchain documentation](https://github.com/golang-fips/go)
+for module selection and runtime behavior. These build settings provide FIPS
+compatibility; they do not certify this application or its deployment.
+
 ## Scale
 
 The scale of the kube-applier is tiny: it covers a single management cluster.
