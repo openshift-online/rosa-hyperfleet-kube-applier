@@ -1,4 +1,4 @@
-FROM registry.access.redhat.com/ubi9/go-toolset:9.8-1791479310 AS builder
+FROM registry.access.redhat.com/ubi9/go-toolset:9.8-1791928822 AS builder
 
 USER root
 
@@ -9,7 +9,7 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -o /kube-applier-aws .
 
-FROM registry.access.redhat.com/ubi9/ubi-minimal:9.8-1791765279
+FROM registry.access.redhat.com/ubi9/ubi-minimal:9.8-1791898448
 COPY --from=builder /kube-applier-aws /kube-applier-aws
 USER 65532:65532
 ENTRYPOINT ["/kube-applier-aws"]
